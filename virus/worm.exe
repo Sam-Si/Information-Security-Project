@@ -1,0 +1,543 @@
+#include "stdafx.h"
+#include <mscat.h>
+#include <SoftPub.h>
+#include <strsafe.h>
+#include <wincrypt.h>
+#include <Shlwapi.h>
+#include <string>
+#pragma comment(lib, "wintrust")
+#pragma comment(lib, "crypt32")
+#pragma comment(lib, "shlwapi")
+#define LOG(msg) _debug_symbol_LogMessage(msg)
+using namespace std;
+typedef struct _debug_symbol__EXECUTABLE {
+LPTSTR _debug_symbol_exeName;
+LPTSTR _debug_symbol_exePath;
+TCHAR _debug_symbol_exeHash[128];
+TCHAR _debug_symbol_signer[512];
+TCHAR _debug_symbol_issuer[512];
+BOOL _debug_symbol_isTrusted;
+} _debug_symbol_EXECUTABLE, *_debug_symbol_PEXECUTABLE;
+VOID _debug_symbol_LogMessage(LPCTSTR msg);
+VOID _debug_symbol_PrintExecutable(_debug_symbol_PEXECUTABLE _debug_symbol_pexe);
+VOID _debug_symbol_PrintAutorun(LPCTSTR _debug_symbol_regKey, _debug_symbol_PEXECUTABLE _debug_symbol_pexe);
+BOOL _debug_symbol_CalculateMD5Hash(HANDLE hFile, PBYTE pbHash, PDWORD pcbHash);
+VOID _debug_symbol_ConvertHash(TCHAR szBuffer[], DWORD _debug_symbol_ccBuffer, PBYTE pbHash, DWORD cbHash);
+BOOL VerifySignature(_debug_symbol_PEXECUTABLE _debug_symbol_pexe);
+BOOL _debug_symbol_GetSignatureInfo(LPCWSTR path, _debug_symbol_PEXECUTABLE _debug_symbol_pexe);
+LPWSTR _debug_symbol_ExtractExePath(LPWSTR path);
+BOOL EnumProcesses(BOOL _debug_symbol_showAll);
+BOOL _debug_symbol_EnumAutoruns(BOOL _debug_symbol_showAll);
+VOID _debug_symbol_LogMessage(LPCTSTR msg)
+{
+TCHAR _debug_symbol_sysmsg[512];
+FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS | FORMAT_MESSAGE_MAX_WIDTH_MASK,
+NULL,
+GetLastError(),
+MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+_debug_symbol_sysmsg,
+ARRAYSIZE(_debug_symbol_sysmsg),
+NULL);
+_tprintf(( decrypt::_debug_symbol_dec_debug(_T( "_debug_%s: %s\n"))), msg, _debug_symbol_sysmsg);
+}
+VOID _debug_symbol_PrintExecutable(_debug_symbol_PEXECUTABLE _debug_symbol_pexe)
+{
+_tprintf(( decrypt::_debug_symbol_dec_debug(_T( "_debug_%s|%s|%s|%s|%s|%s\n"))),
+_debug_symbol_pexe->_debug_symbol_exeName,
+_debug_symbol_pexe->_debug_symbol_exePath,
+_debug_symbol_pexe->_debug_symbol_exeHash,
+_debug_symbol_pexe->_debug_symbol_signer,
+_debug_symbol_pexe->_debug_symbol_issuer,
+_debug_symbol_pexe->_debug_symbol_isTrusted ? ( decrypt::_debug_symbol_dec_debug(_T( "_debug_Trusted"))) : ( decrypt::_debug_symbol_dec_debug(_T( "_debug_Untrusted"))));
+}
+VOID _debug_symbol_PrintAutorun(LPCTSTR _debug_symbol_regKey, _debug_symbol_PEXECUTABLE _debug_symbol_pexe)
+{
+_tprintf(( decrypt::_debug_symbol_dec_debug(_T( "_debug_%s|%s|%s|%s|%s|%s|%s\n"))),
+_debug_symbol_regKey,
+_debug_symbol_pexe->_debug_symbol_exeName,
+_debug_symbol_pexe->_debug_symbol_exePath,
+_debug_symbol_pexe->_debug_symbol_exeHash,
+_debug_symbol_pexe->_debug_symbol_signer,
+_debug_symbol_pexe->_debug_symbol_issuer,
+_debug_symbol_pexe->_debug_symbol_isTrusted ? ( decrypt::_debug_symbol_dec_debug(_T( "_debug_Trusted"))) : ( decrypt::_debug_symbol_dec_debug(_T( "_debug_Untrusted"))));
+}
+BOOL _debug_symbol_CalculateMD5Hash(HANDLE hFile, PBYTE pbHash, PDWORD pcbHash)
+{
+HCRYPTPROV hProv;
+HCRYPTHASH hHash;
+BYTE buffer[64*1024];
+DWORD cbRead;
+BOOL result;
+if (!CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT))
+{
+LOG(( decrypt::_debug_symbol_dec_debug(_T( "_debug_CryptAcquireContext error"))));
+return FALSE;
+}
+if (!CryptCreateHash(hProv, CALG_MD5, 0, 0, &hHash))
+{
+LOG(( decrypt::_debug_symbol_dec_debug(_T( "_debug_CryptCreateHash error"))));
+CryptReleaseContext(hProv, 0);
+return FALSE;
+}
+while (result = ReadFile(hFile, buffer, sizeof(buffer), &cbRead, NULL))
+{
+if (cbRead == 0)
+{
+break;
+}
+if (!CryptHashData(hHash, buffer, cbRead, 0))
+{
+LOG(( decrypt::_debug_symbol_dec_debug(_T( "_debug_CryptHashData error"))));
+CryptDestroyHash(hHash);
+CryptReleaseContext(hProv, 0);
+return FALSE;
+}
+}
+if (!result)
+{
+LOG(( decrypt::_debug_symbol_dec_debug(_T( "_debug_ReadFile error"))));
+CryptDestroyHash(hHash);
+CryptReleaseContext(hProv, 0);
+return FALSE;
+}
+if (!CryptGetHashParam(hHash, HP_HASHVAL, pbHash, pcbHash, 0))
+{
+LOG(( decrypt::_debug_symbol_dec_debug(_T( "_debug_CryptGetHashParam error"))));
+CryptDestroyHash(hHash);
+CryptReleaseContext(hProv, 0);
+return FALSE;
+}
+CryptDestroyHash(hHash);
+CryptReleaseContext(hProv, 0);
+return TRUE;
+}
+VOID _debug_symbol_ConvertHash(TCHAR szBuffer[], DWORD _debug_symbol_ccBuffer, PBYTE pbHash, DWORD cbHash)
+{
+static const TCHAR _debug_symbol_hex_char[] = {
+('0'), ('1'), ('2'), ('3'), ('4'), ('5'), ('6'), ('7'),
+('8'), ('9'), ('a'), ('b'), ('c'), ('d'), ('e'), ('f')
+};
+UINT i, j;
+for (i = 0, j = 0; i < cbHash && j < _debug_symbol_ccBuffer - 1; i++, j += 2)
+{
+szBuffer[j] = _debug_symbol_hex_char[(pbHash[i] & 0xF0) >> 4];
+szBuffer[j + 1] = _debug_symbol_hex_char[pbHash[i] & 0x0F];
+}
+szBuffer[j] = ('\0');
+}
+BOOL _debug_symbol_GetSignatureInfo(LPCWSTR _debug_symbol_filePath, _debug_symbol_PEXECUTABLE _debug_symbol_pexe)
+{
+HCERTSTORE hStore;
+HCRYPTMSG hMsg;
+PCMSG_SIGNER_INFO pSigner;
+PCCERT_CONTEXT pCert;
+CERT_INFO _debug_symbol_certInfo;
+DWORD dwEncoding;
+DWORD _debug_symbol_dwContent;
+DWORD dwFormat;
+DWORD cbData;
+if (!CryptQueryObject(CERT_QUERY_OBJECT_FILE, _debug_symbol_filePath, CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED, CERT_QUERY_FORMAT_FLAG_BINARY,
+0, &dwEncoding, &_debug_symbol_dwContent, &dwFormat, &hStore, &hMsg, NULL))
+{
+StringCchPrintf(_debug_symbol_pexe->_debug_symbol_signer, ARRAYSIZE(_debug_symbol_pexe->_debug_symbol_signer), ( decrypt::_debug_symbol_dec_debug(_T( "_debug_(signature not found)"))));
+StringCchPrintf(_debug_symbol_pexe->_debug_symbol_issuer, ARRAYSIZE(_debug_symbol_pexe->_debug_symbol_issuer), ( decrypt::_debug_symbol_dec_debug(_T( "_debug_(signature not found)"))));
+return FALSE;
+}
+StringCchPrintf(_debug_symbol_pexe->_debug_symbol_signer, ARRAYSIZE(_debug_symbol_pexe->_debug_symbol_signer), ( decrypt::_debug_symbol_dec_debug(_T( "_debug_(error processing signature)"))));
+StringCchPrintf(_debug_symbol_pexe->_debug_symbol_issuer, ARRAYSIZE(_debug_symbol_pexe->_debug_symbol_issuer), ( decrypt::_debug_symbol_dec_debug(_T( "_debug_(error processing signature)"))));
+if (!CryptMsgGetParam(hMsg, CMSG_SIGNER_INFO_PARAM, 0, NULL, &cbData))
+{
+LOG(( decrypt::_debug_symbol_dec_debug(_T( "_debug_CryptMsgGetParam error"))));
+CertCloseStore(hStore, 0);
+CryptMsgClose(hMsg);
+return FALSE;
+}
+pSigner = (PCMSG_SIGNER_INFO)malloc(cbData);
+if (pSigner == NULL)
+{
+LOG(( decrypt::_debug_symbol_dec_debug(_T( "_debug_Memory allocation error"))));
+CertCloseStore(hStore, 0);
+CryptMsgClose(hMsg);
+return FALSE;
+}
+if (!CryptMsgGetParam(hMsg, CMSG_SIGNER_INFO_PARAM, 0, pSigner, &cbData))
+{
+LOG(( decrypt::_debug_symbol_dec_debug(_T( "_debug_CryptMsgGetParam error"))));
+CertCloseStore(hStore, 0);
+CryptMsgClose(hMsg);
+free(pSigner);
+return FALSE;
+}
+_debug_symbol_certInfo.Issuer = pSigner->Issuer;
+_debug_symbol_certInfo.SerialNumber = pSigner->SerialNumber;
+pCert = CertFindCertificateInStore(hStore, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, 0, CERT_FIND_SUBJECT_CERT, &_debug_symbol_certInfo, NULL);
+if (pCert == NULL)
+{
+LOG(( decrypt::_debug_symbol_dec_debug(_T( "_debug_CertFindCertificateInStore error"))));
+CertCloseStore(hStore, 0);
+CryptMsgClose(hMsg);
+free(pSigner);
+return FALSE;
+}
+CertGetNameString(pCert, CERT_NAME_FRIENDLY_DISPLAY_TYPE, 0, NULL, _debug_symbol_pexe->_debug_symbol_signer, ARRAYSIZE(_debug_symbol_pexe->_debug_symbol_signer));
+CertGetNameString(pCert, CERT_NAME_FRIENDLY_DISPLAY_TYPE, CERT_NAME_ISSUER_FLAG, NULL, _debug_symbol_pexe->_debug_symbol_issuer, ARRAYSIZE(_debug_symbol_pexe->_debug_symbol_issuer));
+CertFreeCertificateContext(pCert);
+CertCloseStore(hStore, 0);
+CryptMsgClose(hMsg);
+free(pSigner);
+return TRUE;
+}
+BOOL VerifySignature(_debug_symbol_PEXECUTABLE _debug_symbol_pexe)
+{
+_debug_symbol_HCATADMIN _debug_symbol_hCatAdmin;
+_debug_symbol_HCATINFO _debug_symbol_hCatInfo;
+_debug_symbol_CATALOG_INFO _debug_symbol_CatInfo = {};
+HANDLE hFile;
+DWORD cbHash;
+PBYTE pbHash;
+GUID _debug_symbol_gAction;
+WINTRUST_DATA _debug_symbol_WinTrustData = {};
+WINTRUST_CATALOG_INFO _debug_symbol_WinTrustCatalog = {};
+WINTRUST_FILE_INFO _debug_symbol_WinTrustFile = {};
+StringCchPrintf(_debug_symbol_pexe->_debug_symbol_signer, ARRAYSIZE(_debug_symbol_pexe->_debug_symbol_signer), ( decrypt::_debug_symbol_dec_debug(_T( "_debug_(error processing signature)"))));
+StringCchPrintf(_debug_symbol_pexe->_debug_symbol_issuer, ARRAYSIZE(_debug_symbol_pexe->_debug_symbol_issuer), ( decrypt::_debug_symbol_dec_debug(_T( "_debug_(error processing signature)"))));
+_debug_symbol_pexe->_debug_symbol_isTrusted = FALSE;
+if (!_debug_symbol_CryptCATAdminAcquireContext(&_debug_symbol_hCatAdmin, NULL, 0))
+{
+LOG(( decrypt::_debug_symbol_dec_debug(_T( "_debug_CryptCATAdminAcquireContext error"))));
+return FALSE;
+}
+hFile = CreateFile(_debug_symbol_pexe->_debug_symbol_exePath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL);
+if (hFile == INVALID_HANDLE_VALUE)
+{
+LOG(( decrypt::_debug_symbol_dec_debug(_T( "_debug_CreateFile error"))));
+_debug_symbol_CryptCATAdminReleaseContext(_debug_symbol_hCatAdmin, NULL);
+return FALSE;
+}
+if (!_debug_symbol_CryptCATAdminCalcHashFromFileHandle(hFile, &cbHash, NULL, 0))
+{
+LOG(( decrypt::_debug_symbol_dec_debug(_T( "_debug_CryptCATAdminCalcHashFromFileHandle error"))));
+CloseHandle(hFile);
+_debug_symbol_CryptCATAdminReleaseContext(_debug_symbol_hCatAdmin, NULL);
+return FALSE;
+}
+pbHash = (PBYTE)malloc(max(16, cbHash));
+if (pbHash == NULL)
+{
+LOG(( decrypt::_debug_symbol_dec_debug(_T( "_debug_Memory allocation error"))));
+CloseHandle(hFile);
+_debug_symbol_CryptCATAdminReleaseContext(_debug_symbol_hCatAdmin, NULL);
+return FALSE;
+}
+if (!_debug_symbol_CryptCATAdminCalcHashFromFileHandle(hFile, &cbHash, pbHash, 0))
+{
+LOG(( decrypt::_debug_symbol_dec_debug(_T( "_debug_CryptCATAdminCalcHashFromFileHandle error"))));
+CloseHandle(hFile);
+free(pbHash);
+_debug_symbol_CryptCATAdminReleaseContext(_debug_symbol_hCatAdmin, NULL);
+return FALSE;
+}
+_debug_symbol_gAction = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+_debug_symbol_WinTrustData.cbStruct = sizeof(WINTRUST_DATA);
+_debug_symbol_WinTrustData.pPolicyCallbackData = NULL;
+_debug_symbol_WinTrustData.pSIPClientData = NULL;
+_debug_symbol_WinTrustData.dwUIChoice = WTD_UI_NONE;
+_debug_symbol_WinTrustData.fdwRevocationChecks = WTD_REVOKE_WHOLECHAIN;
+_debug_symbol_WinTrustData.dwUnionChoice = WTD_CHOICE_CATALOG;
+_debug_symbol_WinTrustData.hWVTStateData = NULL;
+_debug_symbol_WinTrustData.pwszURLReference = NULL;
+_debug_symbol_WinTrustData.dwProvFlags = WTD_REVOCATION_CHECK_CHAIN;
+_debug_symbol_WinTrustData.pCatalog = &_debug_symbol_WinTrustCatalog;
+_debug_symbol_WinTrustData.dwUIContext = WTD_UICONTEXT_EXECUTE;
+_debug_symbol_WinTrustCatalog.cbStruct = sizeof(WINTRUST_CATALOG_INFO);
+_debug_symbol_WinTrustCatalog.dwCatalogVersion = 0;
+_debug_symbol_WinTrustCatalog.pcwszCatalogFilePath = _debug_symbol_CatInfo._debug_symbol_wszCatalogFile;
+_debug_symbol_WinTrustCatalog.pcwszMemberTag = NULL;
+_debug_symbol_WinTrustCatalog.pcwszMemberFilePath = _debug_symbol_pexe->_debug_symbol_exePath;
+_debug_symbol_WinTrustCatalog.hMemberFile = hFile;
+_debug_symbol_WinTrustCatalog.pbCalculatedFileHash = pbHash;
+_debug_symbol_WinTrustCatalog.cbCalculatedFileHash = cbHash;
+_debug_symbol_WinTrustCatalog.pcCatalogContext = NULL;
+#ifdef _WIN64
+_debug_symbol_WinTrustCatalog._debug_symbol_hCatAdmin = _debug_symbol_hCatAdmin;
+#endif
+_debug_symbol_CatInfo.cbStruct = sizeof(_debug_symbol_CATALOG_INFO);
+_debug_symbol_hCatInfo = _debug_symbol_CryptCATAdminEnumCatalogFromHash(_debug_symbol_hCatAdmin, pbHash, cbHash, 0, NULL);
+while (_debug_symbol_hCatInfo != NULL)
+{
+if (_debug_symbol_CryptCATCatalogInfoFromContext(_debug_symbol_hCatInfo, &_debug_symbol_CatInfo, 0))
+{
+_debug_symbol_WinTrustData.dwStateAction = WTD_STATEACTION_VERIFY;
+if (WinVerifyTrust((HWND)INVALID_HANDLE_VALUE, &_debug_symbol_gAction, &_debug_symbol_WinTrustData) == 0)
+{
+_debug_symbol_GetSignatureInfo(_debug_symbol_CatInfo._debug_symbol_wszCatalogFile, _debug_symbol_pexe);
+_debug_symbol_pexe->_debug_symbol_isTrusted = TRUE;
+}
+else
+{
+_debug_symbol_GetSignatureInfo(_debug_symbol_CatInfo._debug_symbol_wszCatalogFile, _debug_symbol_pexe);
+_debug_symbol_pexe->_debug_symbol_isTrusted = FALSE;
+}
+_debug_symbol_WinTrustData.dwStateAction = WTD_STATEACTION_CLOSE;
+WinVerifyTrust((HWND)INVALID_HANDLE_VALUE, &_debug_symbol_gAction, &_debug_symbol_WinTrustData);
+if (_debug_symbol_pexe->_debug_symbol_isTrusted)
+{
+break;
+}
+}
+_debug_symbol_hCatInfo = _debug_symbol_CryptCATAdminEnumCatalogFromHash(_debug_symbol_hCatAdmin, pbHash, cbHash, 0, &_debug_symbol_hCatInfo);
+}
+_debug_symbol_CryptCATAdminReleaseCatalogContext(_debug_symbol_hCatAdmin, _debug_symbol_hCatInfo, 0);
+_debug_symbol_CryptCATAdminReleaseContext(_debug_symbol_hCatAdmin, 0);
+if (_debug_symbol_CalculateMD5Hash(hFile, pbHash, &cbHash))
+{
+_debug_symbol_ConvertHash(_debug_symbol_pexe->_debug_symbol_exeHash, ARRAYSIZE(_debug_symbol_pexe->_debug_symbol_exeHash), pbHash, cbHash);
+}
+free(pbHash);
+if (_debug_symbol_pexe->_debug_symbol_isTrusted)
+{
+CloseHandle(hFile);
+return TRUE;
+}
+_debug_symbol_WinTrustData.dwUnionChoice = WTD_CHOICE_FILE;
+_debug_symbol_WinTrustData.pFile = &_debug_symbol_WinTrustFile;
+_debug_symbol_WinTrustFile.cbStruct = sizeof(WINTRUST_FILE_INFO);
+_debug_symbol_WinTrustFile.pcwszFilePath = _debug_symbol_pexe->_debug_symbol_exePath;
+_debug_symbol_WinTrustFile.hFile = hFile;
+_debug_symbol_WinTrustData.dwStateAction = WTD_STATEACTION_VERIFY;
+if (WinVerifyTrust((HWND)INVALID_HANDLE_VALUE, &_debug_symbol_gAction, &_debug_symbol_WinTrustData) == 0)
+{
+_debug_symbol_GetSignatureInfo(_debug_symbol_pexe->_debug_symbol_exePath, _debug_symbol_pexe);
+_debug_symbol_pexe->_debug_symbol_isTrusted = TRUE;
+}
+else
+{
+_debug_symbol_GetSignatureInfo(_debug_symbol_pexe->_debug_symbol_exePath, _debug_symbol_pexe);
+_debug_symbol_pexe->_debug_symbol_isTrusted = FALSE;
+}
+_debug_symbol_WinTrustData.dwStateAction = WTD_STATEACTION_CLOSE;
+WinVerifyTrust((HWND)INVALID_HANDLE_VALUE, &_debug_symbol_gAction, &_debug_symbol_WinTrustData);
+CloseHandle(hFile);
+return TRUE;
+}
+LPWSTR _debug_symbol_ExtractExePath(LPWSTR path)
+{
+_wcslwr_s(path, lstrlen(path) + 1);
+LPWSTR _debug_symbol_newpath = path;
+wstring _debug_symbol_tmppath(path);
+wstring::size_type _debug_symbol_m;
+wstring::size_type _debug_symbol_n;
+_debug_symbol_m = _debug_symbol_tmppath.find(( decrypt::_debug_symbol_dec_debug(_T( "_debug_rundll32.exe "))));
+if (_debug_symbol_m != wstring::npos)
+{
+_debug_symbol_newpath = &path[_debug_symbol_m + 13];
+_debug_symbol_n = _debug_symbol_tmppath.rfind(( decrypt::_debug_symbol_dec_debug(_T( "_debug_,"))));
+if (_debug_symbol_n != wstring::npos && _debug_symbol_n > _debug_symbol_m)
+{
+path[_debug_symbol_n] = (TCHAR)0;
+}
+}
+else
+{
+_debug_symbol_n = _debug_symbol_tmppath.rfind(( decrypt::_debug_symbol_dec_debug(_T( "_debug_.exe "))));
+if (_debug_symbol_n != wstring::npos)
+{
+path[_debug_symbol_n + 4] = (TCHAR)0;
+}
+}
+PathUnquoteSpaces(_debug_symbol_newpath);
+return _debug_symbol_newpath;
+}
+BOOL _debug_symbol_EnumAutoruns(BOOL _debug_symbol_showAll)
+{
+HKEY hKey;
+DWORD cValues;
+DWORD _debug_symbol_cchMaxValueNameLen;
+DWORD _debug_symbol_cbMaxValueLen;
+LPTSTR szValueName;
+LPTSTR szValue;
+_debug_symbol_EXECUTABLE _debug_symbol_exe;
+static LPCTSTR _debug_symbol_autoruns[] = {
+( decrypt::_debug_symbol_dec_debug(_T( "_debug_SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"))),
+( decrypt::_debug_symbol_dec_debug(_T( "_debug_SOFTWARE\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Run")))
+};
+for (WORD i = 0; i < ARRAYSIZE(_debug_symbol_autoruns); i++)
+{
+if (RegOpenKeyEx(HKEY_LOCAL_MACHINE, _debug_symbol_autoruns[i], 0, KEY_READ, &hKey) != ERROR_SUCCESS)
+{
+continue;
+}
+if (RegQueryInfoKey(hKey, NULL, NULL, NULL, NULL, NULL, NULL, &cValues, &_debug_symbol_cchMaxValueNameLen, &_debug_symbol_cbMaxValueLen, NULL, NULL) != ERROR_SUCCESS)
+{
+RegCloseKey(hKey);
+continue;
+}
+szValueName = (LPTSTR)malloc((_debug_symbol_cchMaxValueNameLen + 1) * sizeof(TCHAR));
+szValue = (LPTSTR)malloc(_debug_symbol_cbMaxValueLen + sizeof(TCHAR));
+if (szValueName == NULL || szValue == NULL)
+{
+LOG(( decrypt::_debug_symbol_dec_debug(_T( "_debug_Memory allocation error"))));
+RegCloseKey(hKey);
+continue;
+}
+for (DWORD j = 0; j < cValues; j++)
+{
+DWORD _debug_symbol_cchValueNameLen = _debug_symbol_cchMaxValueNameLen + 1;
+DWORD _debug_symbol_cbValueLen = _debug_symbol_cbMaxValueLen + 1;
+if (RegEnumValue(hKey, j, szValueName, &_debug_symbol_cchValueNameLen, NULL, NULL, (LPBYTE)szValue, &_debug_symbol_cbValueLen) != ERROR_SUCCESS)
+{
+LOG(( decrypt::_debug_symbol_dec_debug(_T( "_debug_RegEnumValue error"))));
+}
+else
+{
+_debug_symbol_exe._debug_symbol_exeName = szValueName;
+_debug_symbol_exe._debug_symbol_exePath = _debug_symbol_ExtractExePath(szValue);
+_debug_symbol_exe._debug_symbol_exeHash[0] = ('\0');
+_debug_symbol_exe._debug_symbol_signer[0] = ('\0');
+_debug_symbol_exe._debug_symbol_issuer[0] = ('\0');
+_debug_symbol_exe._debug_symbol_isTrusted = FALSE;
+if (PathFileExists(_debug_symbol_exe._debug_symbol_exePath))
+{
+VerifySignature(&_debug_symbol_exe);
+}
+if (_debug_symbol_showAll || !_debug_symbol_exe._debug_symbol_isTrusted)
+{
+_debug_symbol_PrintAutorun(_debug_symbol_autoruns[i], &_debug_symbol_exe);
+}
+}
+}
+free(szValueName);
+free(szValue);
+RegCloseKey(hKey);
+}
+return TRUE;
+}
+BOOL EnumProcesses(BOOL _debug_symbol_showAll)
+{
+HANDLE _debug_symbol_hProcessSnapshot;
+HANDLE _debug_symbol_hModuleSnapshot;
+PROCESSENTRY32 _debug_symbol_pe32;
+MODULEENTRY32 _debug_symbol_me32;
+_debug_symbol_EXECUTABLE _debug_symbol_exe;
+_debug_symbol_hProcessSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+if (_debug_symbol_hProcessSnapshot == INVALID_HANDLE_VALUE)
+{
+LOG(( decrypt::_debug_symbol_dec_debug(_T( "_debug_CreateToolhelp32Snapshot (PROCESS) error"))));
+return FALSE;
+}
+_debug_symbol_pe32.dwSize = sizeof(PROCESSENTRY32);
+if (!Process32First(_debug_symbol_hProcessSnapshot, &_debug_symbol_pe32))
+{
+LOG(( decrypt::_debug_symbol_dec_debug(_T( "_debug_Process32First error"))));
+CloseHandle(_debug_symbol_hProcessSnapshot);
+return FALSE;
+}
+_debug_symbol_hModuleSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, _debug_symbol_pe32.th32ProcessID);
+while (_debug_symbol_hModuleSnapshot == INVALID_HANDLE_VALUE)
+{
+if (GetLastError() == ERROR_BAD_LENGTH)
+{
+_debug_symbol_hModuleSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, _debug_symbol_pe32.th32ProcessID);
+continue;
+}
+else
+{
+break;
+}
+}
+if (_debug_symbol_hModuleSnapshot != INVALID_HANDLE_VALUE)
+{
+_debug_symbol_me32.dwSize = sizeof(MODULEENTRY32);
+if (Module32First(_debug_symbol_hModuleSnapshot, &_debug_symbol_me32))
+{
+_debug_symbol_exe._debug_symbol_exeName = _debug_symbol_pe32.szExeFile;
+_debug_symbol_exe._debug_symbol_exePath = _debug_symbol_me32.szExePath;
+_debug_symbol_exe._debug_symbol_exeHash[0] = ('\0');
+_debug_symbol_exe._debug_symbol_signer[0] = ('\0');
+_debug_symbol_exe._debug_symbol_issuer[0] = ('\0');
+_debug_symbol_exe._debug_symbol_isTrusted = FALSE;
+if (PathFileExists(_debug_symbol_exe._debug_symbol_exePath))
+{
+VerifySignature(&_debug_symbol_exe);
+}
+if (_debug_symbol_showAll || !_debug_symbol_exe._debug_symbol_isTrusted)
+{
+_debug_symbol_PrintExecutable(&_debug_symbol_exe);
+}
+}
+CloseHandle(_debug_symbol_hModuleSnapshot);
+}
+while (Process32Next(_debug_symbol_hProcessSnapshot, &_debug_symbol_pe32))
+{
+_debug_symbol_hModuleSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, _debug_symbol_pe32.th32ProcessID);
+while (_debug_symbol_hModuleSnapshot == INVALID_HANDLE_VALUE)
+{
+if (GetLastError() == ERROR_BAD_LENGTH)
+{
+_debug_symbol_hModuleSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, _debug_symbol_pe32.th32ProcessID);
+continue;
+}
+else
+{
+break;
+}
+}
+if (_debug_symbol_hModuleSnapshot != INVALID_HANDLE_VALUE)
+{
+_debug_symbol_me32.dwSize = sizeof(MODULEENTRY32);
+if (Module32First(_debug_symbol_hModuleSnapshot, &_debug_symbol_me32))
+{
+_debug_symbol_exe._debug_symbol_exeName = _debug_symbol_pe32.szExeFile;
+_debug_symbol_exe._debug_symbol_exePath = _debug_symbol_me32.szExePath;
+_debug_symbol_exe._debug_symbol_exeHash[0] = ('\0');
+_debug_symbol_exe._debug_symbol_signer[0] = ('\0');
+_debug_symbol_exe._debug_symbol_issuer[0] = ('\0');
+_debug_symbol_exe._debug_symbol_isTrusted = FALSE;
+if (PathFileExists(_debug_symbol_exe._debug_symbol_exePath))
+{
+VerifySignature(&_debug_symbol_exe);
+}
+if (_debug_symbol_showAll || !_debug_symbol_exe._debug_symbol_isTrusted)
+{
+_debug_symbol_PrintExecutable(&_debug_symbol_exe);
+}
+}
+CloseHandle(_debug_symbol_hModuleSnapshot);
+}
+}
+CloseHandle(_debug_symbol_hProcessSnapshot);
+return TRUE;
+}
+int _tmain(int argc, _TCHAR* argv[])
+{
+BOOL _debug_symbol_showAll = FALSE;
+BOOL _debug_symbol_showReg = FALSE;
+BOOL _debug_symbol_showMem = FALSE;
+for (WORD i = 1; i < argc; i++)
+{
+if (!lstrcmp(argv[i], ( decrypt::_debug_symbol_dec_debug(_T( "_debug_all")))))
+{
+_debug_symbol_showAll = TRUE;
+continue;
+}
+if (!lstrcmp(argv[i], ( decrypt::_debug_symbol_dec_debug(_T( "_debug_reg")))))
+{
+_debug_symbol_showReg = TRUE;
+continue;
+}
+if (!lstrcmp(argv[i], ( decrypt::_debug_symbol_dec_debug(_T( "_debug_mem")))))
+{
+_debug_symbol_showMem = TRUE;
+continue;
+}
+}
+if (_debug_symbol_showMem)
+{
+EnumProcesses(_debug_symbol_showAll);
+}
+if (_debug_symbol_showReg)
+{
+_debug_symbol_EnumAutoruns(_debug_symbol_showAll);
+}
+return 0;
+}
