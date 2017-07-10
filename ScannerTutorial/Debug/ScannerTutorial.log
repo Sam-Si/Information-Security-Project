@@ -1,0 +1,4 @@
+﻿C:\Program Files (x86)\Microsoft Visual Studio\2017\Community\Common7\IDE\VC\VCTargets\Microsoft.Cpp.Common.props(150,5): warning MSB4211: The property "WindowsTargetPlatformVersion" is being set to a value for the first time, but it was already consumed at "C:\Program Files (x86)\Microsoft Visual Studio\2017\Community\Common7\IDE\VC\VCTargets\Microsoft.Cpp.WindowsSDK.props (29,5)".
+  ScannerTutorial.cpp
+  ScannerTutorial.vcxproj -> C:\Users\SamSi\Downloads\ScannerTutorial\Debug\ScannerTutorial.exe
+  ScannerTutorial.vcxproj -> C:\Users\SamSi\Downloads\ScannerTutorial\Debug\ScannerTutorial.pdb (Full PDB)
